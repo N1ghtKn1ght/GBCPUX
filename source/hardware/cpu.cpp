@@ -1,68 +1,75 @@
-#include "cpu.h"
-
+// std
+#include <chrono>
 #include <fstream>
-#include <thread>
 
-#include "memory.h"
-#include "ppu.h"
+// project
+#include "cpu.h"
 #include "tools/commontoolkit.h"
 
 namespace GBCPUX {
 namespace Hardware {
-CPU::CPU(Memory& memory, PPU& ppu) :
-    m_memory(memory), m_ppu(ppu)
+
+CPU::CPU(Memory& memory) 
+    : m_memory(memory)
 {
-	reset();
+    init();
 }
 
-bool CPU::load(std::string path)
+CPU::~CPU() 
 {
-    std::ifstream file;
-    std::string line;
-
-    file.open(path, std::ios::binary);
-    if (!file.is_open()) {
-        return false;
-    }
-    file.seekg(0, std::ios::end);
-    size_t size = file.tellg();
-    std::string buffer(size, ' ');
-    file.seekg(0);
-    file.read(&buffer[0], size);
-    file.close();
-
-    return m_memory.load(buffer);
+    stop();
 }
 
 void CPU::start()
 {
-    constexpr uint32_t ctact = 4194304 / 60;
-    constexpr uint32_t wait = (1000 / 60) + 1;
-    while (true) {
-        int32_t tact = ctact;
-        while (tact > 0) {
-            int cycles = step() * 4;
-            m_ppu.update(cycles);
-            waitHandle();
+    if (m_thread.joinable()) {
+        stop();
+    }
 
-            if (m_IMENext) {
-                m_regs.IME = true;
-                m_IMENext = false;
-            }
-            tact -= cycles;
+    m_isRunning.store(true, std::memory_order_release);
+    m_thread = std::thread(&CPU::run, this);
+}
+
+void CPU::stop() 
+{
+    m_isRunning.store(false, std::memory_order_release);
+    if (m_thread.joinable()) {
+        m_thread.join();
+    }
+}
+
+void CPU::update(const uint8_t cycles)
+{
+    m_clock.fetch_add(cycles, std::memory_order_release);
+}
+
+void CPU::run()
+{
+    while (m_isRunning.load(std::memory_order_acquire))
+    {
+        int cycles = step() * 4;
+
+        waitHandle();
+
+        if (m_regs.NIME) {
+            m_regs.IME = true;
+            m_regs.NIME = false;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(wait));
     }
 }
 
 uint8_t CPU::fetch()
 {
-	uint8_t opcode = m_memory.read(m_regs.PC);
-	m_regs.PC++;
+    if (m_regs.HALT_BUG) {
+        m_regs.HALT_BUG = false;
+        return m_memory.read(m_regs.PC);
+    }
+
+	uint8_t opcode = m_memory.read(m_regs.PC++);
 	return opcode;
 }
 
-void CPU::reset()
+void CPU::init()
 {
     m_regs.A = 0x01;
     m_regs.F = 0xB0;
@@ -75,16 +82,6 @@ void CPU::reset()
 
     m_regs.SP = 0xFFFE;
     m_regs.PC = 0x0100;
-
-    uint8_t ie = 0x00;
-    ie |= Tools::V_BLANK_BIT;
-    ie |= Tools::LCD_STAT_BIT;
-    ie |= Tools::TIMER_BIT;
-    ie |= Tools::JOYPAD_BIT;
-    m_memory.write(Tools::IF_ADDR, 0x00);
-    m_memory.write(Tools::IE_ADDR, ie);
-    m_memory.write(Tools::TAC_ADDR, 0x05);
-    m_regs.IME = true;
 
     for (uint8_t i = 0; i < 0xFF; ++i) {
         opcodes[i] = &CPU::NOP;
@@ -128,13 +125,27 @@ void CPU::reset()
 
 uint8_t CPU::decute(uint8_t opcode)
 {
-    uint8_t(CPU:: *func)() = opcodes[static_cast<int32_t>(opcode)];
+    uint8_t(CPU:: * func)() = opcodes[static_cast<int32_t>(opcode)];
     uint8_t machineCycles = (this->*func)();
     return machineCycles;
 }
 
 uint8_t CPU::step()
 {
+    if (m_regs.HALT)
+    {
+        uint8_t IF = m_memory.read(Tools::IF_ADDR);
+        uint8_t IE = m_memory.read(Tools::IE_ADDR);
+        if (!m_regs.IME && (IE & IF) != 0) {
+            m_regs.HALT_BUG = true;
+            m_regs.HALT = false;
+        }
+        else if ((IE & IF) == 0) {
+            m_regs.HALT = true;
+            return NOP();
+        }
+    }
+
     uint8_t opecode = fetch();
     return decute(opecode);
 }
@@ -153,46 +164,38 @@ void CPU::waitHandle()
         return;
     }
 
+    m_regs.IME = false;
+
     using namespace Tools;
     uint8_t interrupt = 0;
+    uint16_t PC = 0;
     if (pend & V_BLANK_BIT) {
         interrupt = V_BLANK_BIT;
+        PC = V_BLANK_INT;
     }
     else if (pend & LCD_STAT_BIT) {
         interrupt = LCD_STAT_BIT;
+        PC = LCD_STAT_INT;
     }
     else if (pend & TIMER_BIT) {
         interrupt = TIMER_BIT;
+        PC = TIMER_INT;
     }
     else if (pend & JOYPAD_BIT) {
         interrupt = JOYPAD_BIT;
+        PC = JOYPAD_INT;
     }
     else {
         std::string error = "Missed or incorrect interrupt: " + std::to_string(pend);
         throw std::runtime_error(error);
     }
 
-    switch (interrupt)
-    {
-    case V_BLANK_BIT:
-        m_regs.PC = V_BLANK_INT;
-        break;
-    case LCD_STAT_BIT:
-        m_regs.PC = LCD_STAT_INT;
-        break;
-    case TIMER_BIT:
-        m_regs.PC = TIMER_INT;
-        break;
-    case JOYPAD_BIT:
-        m_regs.PC = JOYPAD_INT;
-        break;
-    default:
-        throw std::runtime_error("Unhandled interrupt type.");
-    }
-
     m_memory.write(Tools::IF_ADDR, IF & ~interrupt);
-    m_regs_restore = m_regs;
-    m_regs.IME = false;
+    m_regs.SP -= 2;
+    m_memory.write(m_regs.SP, lsb_8(m_regs.PC));
+    m_memory.write(m_regs.SP + 1, msb_8(m_regs.PC));
+
+    m_regs.PC = PC;
 }
 
 uint8_t CPU::NOP()
@@ -243,7 +246,7 @@ uint8_t CPU::DEC_B()
     m_regs.B = result;
     m_regs.setZero(result == 0);
     m_regs.setSubtract(true);
-    m_regs.setHalfCarry(((value & Tools::MASK_4BITS) - 1) > Tools::MASK_4BITS);
+    m_regs.setHalfCarry((value & 0x0F) == 0);
     return 1;
 }
 
@@ -358,7 +361,7 @@ uint8_t CPU::DEC_D()
     m_regs.D = result;
     m_regs.setZero(result == 0);
     m_regs.setSubtract(true);
-    m_regs.setHalfCarry(((value & Tools::MASK_4BITS) - 1) > Tools::MASK_4BITS);
+    m_regs.setHalfCarry((value & 0x0F) == 0);
     return 1;
 }
 
@@ -383,8 +386,8 @@ uint8_t CPU::RLA()
 
 uint8_t CPU::JR_NZ_e()
 {
-    int8_t e = static_cast<int8_t>(fetch());
-    if (!m_regs.getZero()) {
+    int8_t e = Tools::signed_8(fetch());
+    if (m_regs.getZero() == false) {
         m_regs.PC += e;
         return 3;
     }
@@ -437,7 +440,7 @@ uint8_t CPU::DEC_H()
     m_regs.H = result;
     m_regs.setZero(result == 0);
     m_regs.setSubtract(true);
-    m_regs.setHalfCarry(((value & Tools::MASK_4BITS) - 1) > Tools::MASK_4BITS);
+    m_regs.setHalfCarry((value & 0x0F) == 0);
     return 1;
 }
 
@@ -450,42 +453,38 @@ uint8_t CPU::LD_H_n()
 
 uint8_t CPU::DAA()
 {
-    bool adjust = false;
-    bool carry = false;
-
     if (!m_regs.getSubtract()) {
+        if (m_regs.A > 0x99 || m_regs.getCarry()) {
+            m_regs.A += 0x60;
+            m_regs.setCarry(true);
+        }
 
-        if ((m_regs.A & 0x0F) > 9 || m_regs.getHalfCarry()) {
+        if ((m_regs.A & 0x0F) > 0x9 || m_regs.getHalfCarry()) {
             m_regs.A += 0x06;
         }
-        if (m_regs.A > 0x9F || m_regs.getCarry()) {
-            m_regs.A += 0x60;
-            carry = true;
-        }
     }
-    else {
-        if (m_regs.getHalfCarry()) {
+    else
+    {
+        if (m_regs.getHalfCarry())
+        {
             m_regs.A -= 0x06;
         }
-        if (m_regs.getCarry()) {
+
+        if (m_regs.getCarry())
+        {
             m_regs.A -= 0x60;
         }
     }
 
-    m_regs.setCarry(carry || (m_regs.A > 0xFF));
-
     m_regs.setZero(m_regs.A == 0);
-    m_regs.setSubtract(false);
     m_regs.setHalfCarry(false);
 
-    m_regs.A &= 0xFF;
-
-    return 1;
+    return 4;
 }
 
 uint8_t CPU::JR_NC_e()
 {
-    int8_t e = static_cast<int8_t>(fetch());
+    int8_t e = Tools::signed_8(fetch());
     if (!m_regs.getCarry()) {
         m_regs.PC += e;
         return 3;
@@ -526,7 +525,7 @@ uint8_t CPU::INC_RHL()
     m_regs.setZero(result == 0);
     m_regs.setSubtract(false);
     m_regs.setHalfCarry(((value & Tools::MASK_4BITS) + 1) > Tools::MASK_4BITS);
-    return 1;
+    return 3;
 }
 
 uint8_t CPU::DEC_RHL()
@@ -537,8 +536,8 @@ uint8_t CPU::DEC_RHL()
     m_memory.write(addr, result);
     m_regs.setZero(result == 0);
     m_regs.setSubtract(true);
-    m_regs.setHalfCarry(((value & Tools::MASK_4BITS) - 1) > Tools::MASK_4BITS);
-    return 1;
+    m_regs.setHalfCarry((value & 0x0F) == 0);
+    return 3;
 }
 
 uint8_t CPU::LD_RHL()
@@ -561,7 +560,7 @@ uint8_t CPU::SCF()
 
 uint8_t CPU::JR_e()
 {
-    int8_t e = static_cast<int8_t>(fetch());
+    int8_t e = Tools::signed_8(fetch());
     m_regs.PC += e;
     return 3;
 }
@@ -600,7 +599,7 @@ uint8_t CPU::DEC_DE()
 
 uint8_t CPU::JR_Z_e()
 {
-    int8_t e = static_cast<int8_t>(fetch());
+    int8_t e = Tools::signed_8(fetch());
     if (m_regs.getZero()) {
         m_regs.PC += e;
         return 3;
@@ -645,7 +644,7 @@ uint8_t CPU::DEC_HL()
 
 uint8_t CPU::JR_C_e()
 {
-    int8_t e = static_cast<int8_t>(fetch());
+    int8_t e = Tools::signed_8(fetch());
     if (m_regs.getCarry()) {
         m_regs.PC += e;
         return 3;
@@ -705,7 +704,7 @@ uint8_t CPU::DEC_C()
     m_regs.C = result;
     m_regs.setZero(result == 0);
     m_regs.setSubtract(true);
-    m_regs.setHalfCarry(((value & Tools::MASK_4BITS) - 1) > Tools::MASK_4BITS);
+    m_regs.setHalfCarry((value & 0x0F) == 0);
     return 1;
 }
 
@@ -746,7 +745,7 @@ uint8_t CPU::DEC_E()
     m_regs.E = result;
     m_regs.setZero(result == 0);
     m_regs.setSubtract(true);
-    m_regs.setHalfCarry(((value & Tools::MASK_4BITS) - 1) > Tools::MASK_4BITS);
+    m_regs.setHalfCarry((value & 0x0F) == 0);
     return 1;
 }
 
@@ -787,7 +786,7 @@ uint8_t CPU::DEC_L()
     m_regs.L = result;
     m_regs.setZero(result == 0);
     m_regs.setSubtract(true);
-    m_regs.setHalfCarry(((value & Tools::MASK_4BITS) - 1) > Tools::MASK_4BITS);
+    m_regs.setHalfCarry((value & 0x0F) == 0);
     return 1;
 }
 
@@ -813,7 +812,7 @@ uint8_t CPU::INC_A()
     m_regs.A = result;
     m_regs.setZero(result == 0);
     m_regs.setSubtract(false);
-    m_regs.setHalfCarry(((value & Tools::MASK_4BITS) - 1) > Tools::MASK_4BITS);
+    m_regs.setHalfCarry(((value & Tools::MASK_4BITS) + 1) > Tools::MASK_4BITS);
     return 1;
 }
 
@@ -824,7 +823,7 @@ uint8_t CPU::DEC_A()
     m_regs.A = result;
     m_regs.setZero(result == 0);
     m_regs.setSubtract(true);
-    m_regs.setHalfCarry(((value & Tools::MASK_4BITS) - 1) > Tools::MASK_4BITS);
+    m_regs.setHalfCarry((value & 0x0F) == 0);
     return 1;
 }
 
@@ -1182,8 +1181,10 @@ uint8_t CPU::LD_RHL_L()
 
 uint8_t CPU::HALT()
 { 
-    //TODO
-    return 0;
+    uint8_t IF = m_memory.read(Tools::IF_ADDR);
+    uint8_t IE = m_memory.read(Tools::IE_ADDR);
+    m_regs.HALT = true;
+    return 1;
 }
 
 uint8_t CPU::LD_RHL_A()
@@ -1965,7 +1966,7 @@ uint8_t CPU::OR_C()
 uint8_t CPU::OR_D()
 {
     uint8_t A = m_regs.A;
-    uint8_t R = m_regs.B;
+    uint8_t R = m_regs.D;
     uint8_t result = A | R;
     m_regs.A = result;
     m_regs.setZero(result == 0);
@@ -2444,7 +2445,7 @@ uint8_t CPU::RST_10H()
 
 uint8_t CPU::RET_C()
 {
-    if (!m_regs.getCarry()) {
+    if (m_regs.getCarry()) {
         uint8_t low = m_memory.read(m_regs.SP);
         m_regs.SP += 1;
         uint8_t high = m_memory.read(m_regs.SP);
@@ -2461,18 +2462,9 @@ uint8_t CPU::RETI()
     m_regs.SP += 1;
     uint8_t high = m_memory.read(m_regs.SP);
     m_regs.SP += 1;
+
     m_regs.PC = Tools::unsigned_16(high, low);
     m_regs.IME = true;
-
-    m_regs.A = m_regs_restore.A;
-    m_regs.B = m_regs_restore.B;
-    m_regs.C = m_regs_restore.C;
-    m_regs.D = m_regs_restore.D;
-    m_regs.E = m_regs_restore.E;
-    m_regs.H = m_regs_restore.H;
-    m_regs.L = m_regs_restore.L;
-    m_regs.F = m_regs_restore.F;
-    m_regs_restore = Tools::CPURegisters();
 
     return 4;
 }
@@ -2501,7 +2493,7 @@ uint8_t CPU::CALL_C_nn()
     uint8_t low = fetch();
     uint8_t high = fetch();
     uint16_t value = Tools::unsigned_16(high, low);
-    if (m_regs.getZero()) {
+    if (m_regs.getCarry()) {
         m_regs.SP -= 1;
         m_memory.write(m_regs.SP, Tools::msb_8(m_regs.PC));
         m_regs.SP -= 1;
@@ -2615,13 +2607,14 @@ uint8_t CPU::RST_20H()
 
 uint8_t CPU::ADD_SP_e()
 {
-    int8_t value = static_cast<int8_t>(fetch());
-    uint16_t result = m_regs.SP + value;
+    uint16_t SP = m_regs.SP;
+    int8_t value = Tools::signed_8(fetch());
+    uint16_t result = SP + value;
     m_regs.SP = result;
     m_regs.setZero(false);
     m_regs.setSubtract(false);
-    m_regs.setHalfCarry((m_regs.SP & Tools::MASK_4BITS) + (value & Tools::MASK_4BITS) > Tools::MASK_4BITS);
-    m_regs.setCarry((m_regs.SP & Tools::MASK_12BITS) + (value & Tools::MASK_12BITS) > Tools::MASK_12BITS);
+    m_regs.setHalfCarry(((SP ^ value ^ result) & 0x10) != 0);
+    m_regs.setCarry(((SP ^ value ^ result) & 0x100) != 0);
     return 4;
 }
 
@@ -2683,6 +2676,7 @@ uint8_t CPU::RST_28H()
 
 uint8_t CPU::LDH_A_Rn()
 {
+    static bool a = false;
     uint8_t low = fetch();
     uint16_t addr = Tools::unsigned_16(Tools::MASK_8BITS, low);
     m_regs.A = m_memory.read(addr);
@@ -2696,14 +2690,14 @@ uint8_t CPU::POP_AF()
     uint8_t high = m_memory.read(m_regs.SP);
     m_regs.SP += 1;
     m_regs.A = high;
-    m_regs.F = low & Tools::MASK_4BITS;
+    m_regs.F = low & 0xF0;
     return 3;
 }
 
 uint8_t CPU::LDH_A_RC()
 {
     uint16_t addr = Tools::unsigned_16(Tools::MASK_8BITS, m_regs.C);
-    m_memory.write(addr, m_regs.A);
+    m_regs.A = m_memory.read(addr);
     return 2;
 }
 
@@ -2723,7 +2717,7 @@ uint8_t CPU::PUSH_AF()
     m_regs.SP -= 1;
     m_memory.write(m_regs.SP, m_regs.A);
     m_regs.SP -= 1;
-    m_memory.write(m_regs.SP, m_regs.F & Tools::MASK_4BITS);
+    m_memory.write(m_regs.SP, m_regs.F & 0xF0);
     return 4;
 }
 
@@ -2754,14 +2748,14 @@ uint8_t CPU::RST_30H()
 
 uint8_t CPU::LD_HL_SP_e()
 {
-    int8_t value = static_cast<int8_t>(fetch());
+    int8_t value = Tools::signed_8(fetch());
     uint16_t result = m_regs.SP + value;
     m_regs.H = Tools::msb_8(result);
     m_regs.L = Tools::lsb_8(result);
     m_regs.setZero(false);
     m_regs.setSubtract(false);
     m_regs.setHalfCarry((m_regs.SP & Tools::MASK_4BITS) + (value & Tools::MASK_4BITS) > Tools::MASK_4BITS);
-    m_regs.setCarry((m_regs.SP & Tools::MASK_12BITS) + (value & Tools::MASK_12BITS) > Tools::MASK_12BITS);
+    m_regs.setCarry((m_regs.SP & Tools::MASK_8BITS) + (value & Tools::MASK_8BITS) > Tools::MASK_8BITS);
     return 3;
 }
 
@@ -2783,7 +2777,7 @@ uint8_t CPU::LD_A_Rnn()
 
 uint8_t CPU::EI()
 {
-    m_IMENext = true;
+    m_regs.NIME = true;
     return 1;
 }
 
@@ -2806,8 +2800,7 @@ uint8_t CPU::CP_n()
     m_regs.setSubtract(true);
     m_regs.setHalfCarry(((A & Tools::MASK_4BITS) < (R & Tools::MASK_4BITS)));
     m_regs.setCarry(A < R);
-
-    return 1;
+    return 2;
 }
 
 uint8_t CPU::RST_38H()
@@ -2862,7 +2855,7 @@ uint8_t CPU::RR_R(uint8_t& R)
 {
     uint8_t bit = (R & Tools::MASK_BIT_0);
     uint8_t C = static_cast<uint8_t>(m_regs.getCarry());
-    uint8_t result = (R >> Tools::SHIFT_BIT_0) | (C << Tools::MASK_BIT_7);
+    uint8_t result = (R >> Tools::SHIFT_BIT_0) | (C << Tools::SHIFT_BIT_7);
     R = result;
     m_regs.setZero(result == 0);
     m_regs.setSubtract(false);
@@ -3672,6 +3665,7 @@ uint8_t CPU::RES_0_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     RES_R(0, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -3715,6 +3709,7 @@ uint8_t CPU::RES_1_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     RES_R(1, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -3758,6 +3753,7 @@ uint8_t CPU::RES_2_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     RES_R(2, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -3801,6 +3797,7 @@ uint8_t CPU::RES_3_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     RES_R(3, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -3844,6 +3841,7 @@ uint8_t CPU::RES_4_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     RES_R(4, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -3887,6 +3885,7 @@ uint8_t CPU::RES_5_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     RES_R(5, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -3931,6 +3930,7 @@ uint8_t CPU::RES_6_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     RES_R(6, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -3974,6 +3974,7 @@ uint8_t CPU::RES_7_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     RES_R(7, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -4017,6 +4018,7 @@ uint8_t CPU::SET_0_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     SET_R(0, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -4060,6 +4062,7 @@ uint8_t CPU::SET_1_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     SET_R(1, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -4103,6 +4106,7 @@ uint8_t CPU::SET_2_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     SET_R(2, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -4146,6 +4150,7 @@ uint8_t CPU::SET_3_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     SET_R(3, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -4189,6 +4194,7 @@ uint8_t CPU::SET_4_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     SET_R(4, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -4232,6 +4238,7 @@ uint8_t CPU::SET_5_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     SET_R(5, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -4276,6 +4283,7 @@ uint8_t CPU::SET_6_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     SET_R(6, value);
+    m_memory.write(addr, value);
     return 4;
 }
 
@@ -4319,6 +4327,7 @@ uint8_t CPU::SET_7_RHL()
     uint16_t addr = Tools::unsigned_16(m_regs.H, m_regs.L);
     uint8_t value = m_memory.read(addr);
     SET_R(7, value);
+    m_memory.write(addr, value);
     return 4;
 }
 

@@ -1,16 +1,22 @@
 #pragma once 
 
+// std
 #include <iostream>
 
 namespace GBCPUX {
 namespace Hardware {
 namespace Tools {
 
-constexpr uint16_t IE_ADDR = 0xFFFF;  // Interrupt Enable Register
-constexpr uint16_t IF_ADDR = 0xFF0F;  // Interrupt Flag Register
-constexpr uint16_t TAC_ADDR = 0xFF07;  // Timer Control
-constexpr uint16_t LCD_STAT_ADDR = 0xFF41;  // LCD Status Register
 constexpr uint16_t JOYPAD_ADDR = 0xFF00; // Joypad Register
+constexpr uint16_t SB_ADDR = 0xFF01; // Serial transfer data
+constexpr uint16_t SC_ADDR = 0xFF02; // SIO control
+constexpr uint16_t DIV_ADDR = 0xFF04; // Divider Register
+constexpr uint16_t IF_ADDR = 0xFF0F;  // Interrupt Flag Register
+constexpr uint16_t IE_ADDR = 0xFFFF;  // Interrupt Enable Register
+
+constexpr uint16_t TIMA_ADDR = 0xFF05; // Timer counter
+constexpr uint16_t TMA_ADDR = 0xFF06; // Timer modulo
+constexpr uint16_t TAC_ADDR = 0xFF07; // Timer control
 
 constexpr uint8_t V_BLANK_BIT = 0x01;
 constexpr uint8_t LCD_STAT_BIT = 0x02;
@@ -37,7 +43,7 @@ constexpr uint16_t OBP1_ADDR = 0xFF49;
 constexpr uint16_t WY_ADDR = 0xFF4A;
 constexpr uint16_t WX_ADDR = 0xFF4B;
 
-constexpr uint8_t LCDC_STAT = 0x80;
+constexpr uint8_t LCDC_ENABLE = 0x80;
 constexpr uint8_t LCDC_SELECT_WINDOW = 0x40;
 constexpr uint8_t LCDC_STAT_WINDOW = 0x20;
 constexpr uint8_t LCDC_SELECT_TITLE = 0x10;
@@ -84,55 +90,57 @@ inline uint16_t unsigned_16(const uint8_t& msb, const uint8_t& lsb)
     return ((uint16_t)msb << 8) | lsb;
 }
 
+inline int8_t signed_8(const uint8_t& value) 
+{
+    return +static_cast<int8_t>(value);
+}
 
 struct CPURegisters {
     uint8_t A = 0, F = 0, B = 0, C = 0, D = 0, E = 0, H = 0, L = 0;
     uint16_t SP = 0, PC = 0;
-    bool IME = false;
+    bool IME = false, NIME = false, HALT = false, HALT_BUG = false;
 
-    void setZero(bool value) {
+    void setZero(bool value) 
+    {
         if (value)
             F |= 0x80;
         else
             F &= ~0x80;
     }
 
-    bool getZero() const {
-        return (F & 0x80) != 0;
-    }
+    bool getZero() const { return (F & 0x80) != 0; }
 
-    void setSubtract(bool value) {
+    void setSubtract(bool value) 
+    {
         if (value)
             F |= 0x40;
         else
             F &= ~0x40;
     }
 
-    bool getSubtract() const {
-        return (F & 0x40) != 0;
-    }
+    bool getSubtract() const { return (F & 0x40) != 0; }
 
-    void setHalfCarry(bool value) {
+    void setHalfCarry(bool value) 
+    {
         if (value)
             F |= 0x20;
         else
             F &= ~0x20;
     }
 
-    bool getHalfCarry() const {
-        return (F & 0x20) != 0;
-    }
+    bool getHalfCarry() const  {return (F & 0x20) != 0; }
 
-    void setCarry(bool value) {
-        if (value)
+    void setCarry(bool value) 
+    {
+        if (value) {
             F |= 0x10;
-        else
+        }
+        else {
             F &= ~0x10;
+        }
     }
 
-    bool getCarry() const {
-        return (F & 0x10) != 0;
-    }
+    bool getCarry() const { return (F & 0x10) != 0; }
 };
 
 }

@@ -1,8 +1,11 @@
 #pragma once
 
+// std
 #include <iostream>
 #include <array>
 #include <vector>
+#include <mutex>
+
 
 namespace GBCPUX {
 namespace Hardware {
@@ -19,8 +22,8 @@ constexpr uint16_t HRAM_MAP = 0xFF80;
 class Memory
 {
 public:
-    Memory() {};
-    ~Memory() {};
+    Memory() {}
+    ~Memory() = default;
 
     bool load(const std::string& buffer);
     uint8_t read(uint16_t address) const;
@@ -37,7 +40,6 @@ private:
     std::array<uint8_t, 0xA0> OAM = { 0x00 };
     std::array<uint8_t, 0x80> IO = { 0x00 };
     std::array<uint8_t, 0x80> HRAM = { 0x00 };
-
 };
 
 }

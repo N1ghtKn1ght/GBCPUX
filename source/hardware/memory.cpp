@@ -1,3 +1,4 @@
+// project
 #include "memory.h"
 
 namespace GBCPUX {
@@ -5,6 +6,15 @@ namespace Hardware {
 
 bool Memory::load(const std::string& buffer)
 {
+	EROM.clear();
+	RAM.fill(0x00);
+	VRAM.fill(0x00);
+	ROM.fill(0x00);
+	ERAM.fill(0x00);
+	OAM.fill(0x00);
+	IO.fill(0x00);
+	HRAM.fill(0x00);
+
 	if (buffer.size() < 0x4000) {
 		return false;
 	}
@@ -28,7 +38,7 @@ bool Memory::load(const std::string& buffer)
 	}
 
 	std::copy(buffer.begin(), buffer.begin() + 0x4000, ROM.begin());
-	size_t size = 0x4000 * (banks - 1);
+	size_t size = 0x4000 * banks;
 	EROM.resize(size);
 	std::copy(buffer.begin() + 0x4000, buffer.end(), EROM.begin());
 
@@ -37,13 +47,12 @@ bool Memory::load(const std::string& buffer)
 
 uint8_t Memory::read(uint16_t address) const
 {
-	uint8_t value = 0x0;
+	uint8_t value = 0x00;
 	if (ROM_MAP <= address && address <= 0x3FFF) {
 		value = ROM[address];
 	}
 	else if (EROM_MAP <= address && address <= 0x7FFF) {
-		uint8_t bank = std::max((uint8_t)0x01, m_currentBankROM);
-		uint32_t addr = (address - EROM_MAP) * bank;
+		uint32_t addr = (address - EROM_MAP) + (0x4000 * (m_currentBankROM));
 		value = EROM[addr];
 	}
 	else if (VRAM_MAP <= address && address <= 0x9FFF) {
@@ -57,6 +66,9 @@ uint8_t Memory::read(uint16_t address) const
 	}
 	else if (OAM_MAP <= address && address <= 0xFE9F) {
 		value = OAM[address - OAM_MAP];
+	}
+	else if (0xFEA0 <= address && address <= 0xFEFF) {
+		value = 0xFF;
 	}
 	else if (IO_MAP <= address && address <= 0xFF7F) {
 		value = IO[address - IO_MAP];
@@ -99,5 +111,6 @@ void Memory::write(uint16_t address, uint8_t value)
 			<< std::hex << address << " value: " << std::hex << (int)value << "\n";
 	}
 }
+
 }
 }

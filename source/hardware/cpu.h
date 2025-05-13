@@ -1,37 +1,47 @@
 #pragma once 
 
+// std
 #include <cstdint>
 #include <iostream>
 #include <string>
 #include <array>
+#include <thread>
+#include <atomic>
 
+// project
+#include "memory.h"
+#include "ppu.h"
+#include "timer.h"
 #include "tools/commontoolkit.h"
 
 namespace GBCPUX {
 namespace Hardware {
 
-class Memory;
-class PPU;
-
 class CPU
 {
 public:
-    CPU(Memory& memory, PPU& ppu);
-    ~CPU() = default;
-    bool load(std::string path);
+    CPU(Memory& memory);
+    ~CPU();
+
     void start();
+    void stop();
+
+    void update(const uint8_t cycles);
 
 private:
     Memory& m_memory;
-    PPU& m_ppu;
-    bool m_IMENext = false;
     Tools::CPURegisters m_regs;
-    Tools::CPURegisters m_regs_restore;
     std::array<uint8_t(CPU::*)(), 256> opcodes;
     std::array<uint8_t(CPU::*)(), 256> prefixs;
+
+    std::atomic<uint32_t> m_clock = 0;
+    std::atomic<bool> m_isRunning;
+    std::thread m_thread;
      
 private: 
-    void reset();
+    void init();
+    void run();
+
     uint8_t fetch();
     uint8_t decute(uint8_t opcode);
     uint8_t step();
@@ -562,6 +572,7 @@ private:
     uint8_t BIT_R(const uint8_t shift, const uint8_t R);
     uint8_t RES_R(const uint8_t shift, uint8_t& R);
     uint8_t SET_R(const uint8_t shift, uint8_t& R);
+
     //0x00
     uint8_t RLC_B();
     //0x01
